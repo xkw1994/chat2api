@@ -18,14 +18,48 @@ async def rt2ac(refresh_token, force_refresh=False):
         return access_token
     else:
         try:
-            access_token = await chat_refresh(refresh_token)
+            if refresh_token.startswith("eyJhbGciOiJkaXIi"):
+                access_token = await session_refresh(refresh_token)
+            else:
+                access_token = await chat_refresh(refresh_token)
             globals.refresh_map[refresh_token] = {"token": access_token, "timestamp": int(time.time())}
             with open(globals.REFRESH_MAP_FILE, "w") as f:
                 json.dump(globals.refresh_map, f, indent=4)
-            logger.info(f"refresh_token -> access_token with openai: {access_token}")
+            logger.info("refresh_token -> access_token successfully refreshed")
             return access_token
         except HTTPException as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+async def session_refresh(session_token):
+    session_id = hashlib.md5(session_token.encode()).hexdigest()
+    proxy_url = random.choice(proxy_url_list).replace("{}", session_id) if proxy_url_list else None
+    client = Client(proxy=proxy_url, impersonate='chrome120')
+    try:
+        cookies = {"__Secure-next-auth.session-token": session_token}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15",
+            "Accept": "*/*",
+        }
+        r = await client.get("https://chatgpt.com/api/auth/session", headers=headers, cookies=cookies, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            if "accessToken" in data:
+                return data["accessToken"]
+            raise Exception(f"No accessToken in session response: {r.text[:150]}")
+        else:
+            if "invalid" in r.text or r.status_code in (401, 403):
+                if session_token not in globals.error_token_list:
+                    globals.error_token_list.append(session_token)
+                    with open(globals.ERROR_TOKENS_FILE, "a", encoding="utf-8") as f:
+                        f.write(session_token + "\n")
+            raise Exception(f"Session refresh failed with {r.status_code}: {r.text[:150]}")
+    except Exception as e:
+        logger.error(f"Failed to refresh session_token: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to refresh access_token via session_token.")
+    finally:
+        await client.close()
+        del client
 
 
 async def chat_refresh(refresh_token):
